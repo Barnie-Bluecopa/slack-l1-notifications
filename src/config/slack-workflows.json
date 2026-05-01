@@ -1,0 +1,61 @@
+{
+  "workflows": [
+    {
+      "id": "auto-scan-l1-support",
+      "name": "Auto-Scan Trigger",
+      "description": "Automated scanner for @l1-support mentions across all Slack channels",
+      "trigger": {
+        "type": "scheduled",
+        "schedule": {
+          "frequency": "custom",
+          "interval_minutes": 45,
+          "start_time": "08:00",
+          "timezone": "Asia/Kolkata",
+          "days_of_week": ["monday", "tuesday", "wednesday", "thursday", "friday"]
+        }
+      },
+      "target_channel": "#l1-support-tickets",
+      "usergroup": {
+        "handle": "l1-support",
+        "note": "DYNAMIC membership - resolved at runtime. Do NOT hardcode user IDs. Members may join or leave at any time."
+      },
+      "message_template": {
+        "text": ":arrows_counterclockwise: *Auto-Scan Trigger* (every 45 min)\n`@Claude` — Scan all Slack channels for new `@l1-support` mentions. For each mention, check the thread for responses from <!subteam^l1-support> members. Post a summary here showing :large_green_circle: Attended (by whom) or :red_circle: Unattended for each. Tag L1 team on any unattended mentions.",
+        "use_dynamic_usergroup": true,
+        "usergroup_reference": "<!subteam^l1-support>"
+      },
+      "scan_parameters": {
+        "scope": "all_channels",
+        "lookback_days": 3,
+        "mention_target": "@l1-support",
+        "status_indicators": {
+          "attended": ":large_green_circle:",
+          "unattended": ":red_circle:",
+          "pending": ":warning:",
+          "handled_by_others": ":large_yellow_circle:"
+        }
+      },
+      "notes": [
+        "Schedule: Every 45 minutes starting from 8:00 AM IST (Indian Standard Time)",
+        "Active days: Monday through Friday (weekdays only)",
+        "L1 support team membership is DYNAMIC via @l1-support usergroup",
+        "Do NOT hardcode specific user IDs - use <!subteam^l1-support> for member references",
+        "Current members are resolved at runtime when the scan executes"
+      ]
+    }
+  ],
+  "usergroups": {
+    "l1-support": {
+      "handle": "l1-support",
+      "description": "L1 Support Team - First line of support for customer issues",
+      "membership": "dynamic",
+      "membership_note": "Membership is managed externally and may change at any time. Always resolve members at runtime using the Slack API usergroups.users.list endpoint.",
+      "slack_reference": "<!subteam^l1-support>"
+    }
+  },
+  "timezone_info": {
+    "configured_timezone": "Asia/Kolkata",
+    "utc_offset": "+05:30",
+    "description": "Indian Standard Time (IST)"
+  }
+}

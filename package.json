@@ -1,0 +1,12 @@
+{
+  "name": "slack-l1-notifications",
+  "version": "1.0.0",
+  "description": "Automated L1 support Slack notifications and scanning workflows",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5"
+  }
+}
