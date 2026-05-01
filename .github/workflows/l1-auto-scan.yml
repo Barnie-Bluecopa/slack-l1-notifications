@@ -1,0 +1,35 @@
+name: L1 Auto-Scan Trigger
+
+on:
+  schedule:
+    # Every 15 min, 02:00–16:59 UTC (= 07:30–22:29 IST), weekdays only.
+    # IST = UTC+5:30, so all 45-min trigger times from 8:00 AM IST land exactly
+    # on UTC quarter-hour marks (:00, :15, :30, :45). The script filters to the
+    # correct 19 trigger times; other cron fires are no-ops.
+    - cron: '*/15 2-16 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Post regardless of time check (for testing)'
+        required: false
+        default: 'false'
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Post auto-scan message
+        run: npm run trigger
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          FORCE_TRIGGER: ${{ github.event.inputs.force }}

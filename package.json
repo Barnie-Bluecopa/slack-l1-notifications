@@ -4,9 +4,14 @@
   "description": "Automated L1 support Slack notifications and scanning workflows",
   "private": true,
   "scripts": {
+    "trigger": "tsx src/trigger.ts",
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "@slack/web-api": "^7"
+  },
   "devDependencies": {
+    "tsx": "^4",
     "typescript": "^5"
   }
 }
