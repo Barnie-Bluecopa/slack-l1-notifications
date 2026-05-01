@@ -12,7 +12,8 @@ on:
       force:
         description: 'Post regardless of time check (for testing)'
         required: false
-        default: 'false'
+        type: boolean
+        default: false
 
 jobs:
   trigger:

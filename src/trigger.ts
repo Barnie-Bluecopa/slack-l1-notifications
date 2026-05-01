@@ -34,6 +34,7 @@ async function main() {
   const istStr = ist.toISOString().replace('T', ' ').slice(0, 16) + ' IST';
 
   const force = process.env.FORCE_TRIGGER === 'true';
+  console.log(`[${istStr}] force=${force} isTriggerTime=${isTriggerTime(ist)}`);
 
   if (!force && !isTriggerTime(ist)) {
     console.log(`[${istStr}] Not a trigger time — skipping.`);
