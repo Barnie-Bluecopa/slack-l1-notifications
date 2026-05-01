@@ -4,7 +4,6 @@ const INTERVAL_MINUTES = 45;
 const START_HOUR_IST = 8;   // 8:00 AM IST
 const END_HOUR_IST = 22;    // 10:00 PM IST
 const JITTER_TOLERANCE = 2; // minutes — handles GitHub Actions scheduling delay
-const L1_USERGROUP_HANDLE = 'l1-support';
 
 function toIST(utc: Date): Date {
   return new Date(utc.getTime() + (5 * 60 + 30) * 60 * 1000);
@@ -25,18 +24,18 @@ function isTriggerTime(ist: Date): boolean {
   return remainder <= JITTER_TOLERANCE || remainder >= INTERVAL_MINUTES - JITTER_TOLERANCE;
 }
 
-// Resolves @l1-support to its Slack usergroup ID so <!subteam^ID|handle>
-// renders correctly. Requires the usergroups:read scope on the bot token.
-async function resolveUsergroupRef(client: WebClient, handle: string): Promise<string> {
-  const { usergroups } = await client.usergroups.list();
-  const group = usergroups?.find((g: any) => g.handle === handle);
-  if (!group) throw new Error(`Slack usergroup @${handle} not found — check bot has usergroups:read scope`);
-  return `<!subteam^${group.id}|${group.handle}>`;
+// Formats comma-separated user IDs (e.g. "U07K5U2QJHW,U087QBEDXNC") into
+// Slack mention syntax: "<@U07K5U2QJHW>, <@U087QBEDXNC>"
+function formatMembers(memberIds: string): string {
+  return memberIds
+    .split(',')
+    .map((id) => `<@${id.trim()}>`)
+    .join(', ');
 }
 
-function buildMessage(usergroupRef: string): string {
+function buildMessage(memberMentions: string): string {
   return `:arrows_counterclockwise: *Auto-Scan Trigger* (every 45 min)
-\`@Claude\` — Scan all Slack channels for new \`@l1-support\` mentions. For each mention, check the thread for responses from ${usergroupRef} members. Post a summary here showing :large_green_circle: Attended (by whom) or :red_circle: Unattended for each. Tag L1 team on any unattended mentions.`;
+\`@Claude\` — Scan all Slack channels for new \`@l1-support\` mentions. For each mention, check the thread for responses from L1 team members (${memberMentions}). Post a summary here showing :large_green_circle: Attended (by whom) or :red_circle: Unattended for each. Tag L1 team on any unattended mentions.`;
 }
 
 async function main() {
@@ -57,12 +56,13 @@ async function main() {
   const channel = process.env.SLACK_CHANNEL_ID;
   if (!channel) throw new Error('SLACK_CHANNEL_ID is not set');
 
+  const memberIds = process.env.SLACK_L1_MEMBER_IDS;
+  if (!memberIds) throw new Error('SLACK_L1_MEMBER_IDS is not set');
+
+  const memberMentions = formatMembers(memberIds);
+  const text = buildMessage(memberMentions);
+
   const client = new WebClient(token);
-
-  const usergroupRef = await resolveUsergroupRef(client, L1_USERGROUP_HANDLE);
-  console.log(`[${istStr}] Resolved usergroup: ${usergroupRef}`);
-
-  const text = buildMessage(usergroupRef);
   await client.chat.postMessage({ channel, text, mrkdwn: true });
 
   console.log(`[${istStr}] Posted auto-scan trigger to ${channel}`);

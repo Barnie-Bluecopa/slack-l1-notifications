@@ -33,4 +33,5 @@ jobs:
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          SLACK_L1_MEMBER_IDS: ${{ secrets.SLACK_L1_MEMBER_IDS }}
           FORCE_TRIGGER: ${{ github.event.inputs.force }}
