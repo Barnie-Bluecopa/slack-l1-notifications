@@ -33,9 +33,9 @@ function formatMembers(memberIds: string): string {
     .join(', ');
 }
 
-function buildMessage(memberMentions: string): string {
+function buildMessage(claudeMention: string, memberMentions: string): string {
   return `:arrows_counterclockwise: *Auto-Scan Trigger* (every 45 min)
-\`@Claude\` — Scan all Slack channels for new \`@l1-support\` mentions. For each mention, check the thread for responses from L1 team members (${memberMentions}). Post a summary here showing :large_green_circle: Attended (by whom) or :red_circle: Unattended for each. Tag L1 team on any unattended mentions.`;
+${claudeMention} — Scan all Slack channels for new \`@l1-support\` mentions. For each mention, check the thread for responses from L1 team members (${memberMentions}). Post a summary here showing :large_green_circle: Attended (by whom) or :red_circle: Unattended for each. Tag L1 team on any unattended mentions.`;
 }
 
 async function main() {
@@ -59,8 +59,12 @@ async function main() {
   const memberIds = process.env.SLACK_L1_MEMBER_IDS;
   if (!memberIds) throw new Error('SLACK_L1_MEMBER_IDS is not set');
 
+  const claudeBotId = process.env.SLACK_CLAUDE_BOT_ID;
+  if (!claudeBotId) throw new Error('SLACK_CLAUDE_BOT_ID is not set');
+
   const memberMentions = formatMembers(memberIds);
-  const text = buildMessage(memberMentions);
+  const claudeMention = `<@${claudeBotId}>`;
+  const text = buildMessage(claudeMention, memberMentions);
 
   const client = new WebClient(token);
   await client.chat.postMessage({ channel, text, mrkdwn: true });
