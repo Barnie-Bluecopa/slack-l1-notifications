@@ -31,7 +31,7 @@ jobs:
       - name: Post auto-scan message
         run: npm run trigger
         env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_USER_TOKEN: ${{ secrets.SLACK_USER_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
           SLACK_L1_MEMBER_IDS: ${{ secrets.SLACK_L1_MEMBER_IDS }}
           SLACK_CLAUDE_BOT_ID: ${{ secrets.SLACK_CLAUDE_BOT_ID }}

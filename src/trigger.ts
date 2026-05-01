@@ -50,8 +50,8 @@ async function main() {
     return;
   }
 
-  const token = process.env.SLACK_BOT_TOKEN;
-  if (!token) throw new Error('SLACK_BOT_TOKEN is not set');
+  const token = process.env.SLACK_USER_TOKEN;
+  if (!token) throw new Error('SLACK_USER_TOKEN is not set');
 
   const channel = process.env.SLACK_CHANNEL_ID;
   if (!channel) throw new Error('SLACK_CHANNEL_ID is not set');
