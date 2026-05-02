@@ -65,6 +65,26 @@ async function getL1Members(
   return { ids, handle };
 }
 
+async function resolveUserNames(
+  client: WebClient,
+  userIds: string[]
+): Promise<Map<string, string>> {
+  const nameMap = new Map<string, string>();
+  await Promise.all(
+    userIds.map(async id => {
+      try {
+        const res = await client.users.info({ user: id });
+        const p = res.user?.profile;
+        const name = (p?.display_name || p?.real_name || res.user?.name || id) as string;
+        nameMap.set(id, name);
+      } catch {
+        nameMap.set(id, id);
+      }
+    })
+  );
+  return nameMap;
+}
+
 interface Mention {
   channelId: string;
   channelName: string;
@@ -266,7 +286,8 @@ function buildBlocks(
 function buildCanvasMarkdown(
   mentions: Mention[],
   l1MemberIds: string[],
-  usergroupId: string,
+  userNames: Map<string, string>,
+  usergroupHandle: string,
   istStr: string
 ): string {
   const attended = mentions.filter(m => m.attended);
@@ -282,7 +303,7 @@ function buildCanvasMarkdown(
   lines.push('');
   lines.push('## :busts_in_silhouette: Current @l1-support Team Members');
   lines.push('');
-  lines.push(l1MemberIds.map(id => `<@${id}>`).join('   '));
+  lines.push(l1MemberIds.map(id => `@${userNames.get(id) ?? id}`).join('   '));
   lines.push('');
 
   lines.push('---');
@@ -302,7 +323,7 @@ function buildCanvasMarkdown(
       lines.push(`### ${i + 1}. #${m.channelName} — ${title}`);
       lines.push('');
       lines.push(`* **From:** ${m.userName}`);
-      lines.push(`* **Channel:** <#${m.channelId}>`);
+      lines.push(`* **Channel:** #${m.channelName}`);
       lines.push(`* **Time:** ${canvasDate(m.messageTs)}`);
       lines.push(`* **Status:** :red_circle: **UNATTENDED — No L1 response**`);
       lines.push(`* **Message:** *"${snippet}"*`);
@@ -327,12 +348,12 @@ function buildCanvasMarkdown(
       const title = extractTitle(m.text);
       const tickets = extractTickets(m.text);
       const snippet = m.text.length > 300 ? m.text.slice(0, 297) + '…' : m.text;
-      const responders = m.attendedBy.map(id => `<@${id}>`).join(', ');
+      const responders = m.attendedBy.map(id => `@${userNames.get(id) ?? id}`).join(', ');
 
       lines.push(`### ${unattended.length + i + 1}. #${m.channelName} — ${title}`);
       lines.push('');
       lines.push(`* **From:** ${m.userName}`);
-      lines.push(`* **Channel:** <#${m.channelId}>`);
+      lines.push(`* **Channel:** #${m.channelName}`);
       lines.push(`* **Time:** ${canvasDate(m.messageTs)}`);
       lines.push(`* **Status:** :large_green_circle: **Attended by** ${responders}`);
       lines.push(`* **Message:** *"${snippet}"*`);
@@ -359,7 +380,7 @@ function buildCanvasMarkdown(
   lines.push('');
   lines.push('## :gear: How This Works');
   lines.push('');
-  lines.push(`* **Scans** all public and private channels for \`@l1-support\` (subteam ${usergroupId}) mentions`);
+  lines.push(`* **Scans** all public and private channels for \`@${usergroupHandle}\` mentions`);
   lines.push('* **Checks threads** for responses from current @l1-support group members (dynamic — reflects real-time membership)');
   lines.push('* **Visual cues:** :large_green_circle: Attended (with responder name) · :red_circle: Unattended');
   lines.push('* Auto-updated by GitHub Actions every 45 minutes — no manual refresh needed');
@@ -374,53 +395,37 @@ async function refreshCanvas(
 ): Promise<void> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const api = (client as any).canvases;
-  const sectionIds = new Set<string>();
 
-  // Slack limits section_types to 3 per lookup — split into groups of 3.
-  const lookups: Array<{ section_types?: string[]; contains_text?: string }> = [
-    { section_types: ['any_header', 'bullet_list', 'ordered_list'] },
-    { section_types: ['divider', 'table', 'todo'] },
-    { section_types: ['quote', 'code_block', 'media'] },
-    { contains_text: 'Last scanned:' },
-    { contains_text: 'UNATTENDED' },
-    { contains_text: 'ATTENDED' },
-    { contains_text: 'l1-support' },
-    { contains_text: 'How This Works' },
-    { contains_text: 'auto-scans' },
+  // Slack limits section_types to 3 per criteria call. Cover all known types
+  // across multiple calls and run two passes to catch anything missed on the first.
+  const typeChunks = [
+    ['any_header', 'bullet_list', 'ordered_list'],
+    ['divider', 'table', 'todo'],
+    ['quote', 'code_block', 'media'],
+    ['paragraph', 'callout', 'image'],
   ];
 
-  let scopesVerified = false;
-  for (const criteria of lookups) {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const res: any = await api.sections.lookup({ canvas_id: canvasId, criteria });
-      const found = (res.sections ?? []).length;
-      for (const s of (res.sections ?? [])) {
-        if (s.id) sectionIds.add(s.id as string);
+  for (let pass = 0; pass < 2; pass++) {
+    const ids = new Set<string>();
+    for (const types of typeChunks) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const res: any = await api.sections.lookup({ canvas_id: canvasId, criteria: { section_types: types } });
+        for (const s of (res.sections ?? [])) {
+          if (s.id) ids.add(s.id as string);
+        }
+      } catch {
+        // unknown type chunk — skip silently
       }
-      console.log(`  canvas lookup ${JSON.stringify(criteria)}: ${found} section(s)`);
-      scopesVerified = true;
-    } catch (e: unknown) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const err = e as any;
-      if (!scopesVerified && err.data?.needed) {
-        console.log(`  canvas missing_scope — needed: "${err.data.needed}", token provides: "${err.data.provided ?? 'unknown'}"`);
-        console.log(`  Fix: go to api.slack.com/apps → OAuth & Permissions → copy the latest xoxp- token → update SLACK_USER_TOKEN secret`);
-        scopesVerified = true;
-      }
-      console.log(`  canvas lookup ${JSON.stringify(criteria)}: FAILED — ${(e as Error).message ?? e}`);
     }
-  }
-
-  console.log(`  Total unique sections to clear: ${sectionIds.size}`);
-
-  // canvases.edit only accepts 1 change per call — delete each section individually,
-  // then insert the fresh content.
-  for (const id of sectionIds) {
-    try {
-      await api.edit({ canvas_id: canvasId, changes: [{ operation: 'delete', section_id: id }] });
-    } catch (e: unknown) {
-      console.log(`  Failed to delete section ${id}: ${(e as Error).message ?? e}`);
+    if (ids.size === 0) break;
+    console.log(`  Pass ${pass + 1}: clearing ${ids.size} section(s)...`);
+    for (const id of ids) {
+      try {
+        await api.edit({ canvas_id: canvasId, changes: [{ operation: 'delete', section_id: id }] });
+      } catch {
+        // section already gone — skip
+      }
     }
   }
 
@@ -473,7 +478,9 @@ async function main() {
   if (canvasId) {
     console.log(`[${istStr}] Refreshing canvas ${canvasId}...`);
     try {
-      const canvasMarkdown = buildCanvasMarkdown(mentions, l1MemberIds, usergroupId, istStr);
+      const allUserIds = [...new Set([...l1MemberIds, ...mentions.flatMap(m => m.attendedBy)])];
+      const userNames = await resolveUserNames(client, allUserIds);
+      const canvasMarkdown = buildCanvasMarkdown(mentions, l1MemberIds, userNames, handle, istStr);
       await refreshCanvas(client, canvasId, canvasMarkdown);
       console.log(`[${istStr}] Canvas refreshed`);
     } catch (err: unknown) {
