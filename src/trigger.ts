@@ -1,10 +1,12 @@
 import { WebClient } from '@slack/web-api';
+import type { KnownBlock } from '@slack/web-api';
 
 const LOOKBACK_DAYS = 3;
 const INTERVAL_MINUTES = 45;
 const START_HOUR_IST = 8;
 const END_HOUR_IST = 22;
 const JITTER_TOLERANCE = 2;
+const JIRA_BASE = 'https://assetten.atlassian.net/browse';
 
 function toIST(utc: Date): Date {
   return new Date(utc.getTime() + (5 * 60 + 30) * 60 * 1000);
@@ -19,6 +21,25 @@ function isTriggerTime(ist: Date): boolean {
   const minutesSinceOpen = (h - START_HOUR_IST) * 60 + m;
   const remainder = minutesSinceOpen % INTERVAL_MINUTES;
   return remainder <= JITTER_TOLERANCE || remainder >= INTERVAL_MINUTES - JITTER_TOLERANCE;
+}
+
+// Renders as the user's local time in Slack
+function slackDate(ts: string): string {
+  const unix = Math.floor(parseFloat(ts));
+  return `<!date^${unix}^{date_short_pretty} at {time}|${new Date(unix * 1000).toISOString()}>`;
+}
+
+// First meaningful sentence from the message, stripped of @l1-support prefix
+function extractTitle(text: string): string {
+  const cleaned = text.replace(/@l1-support\s*/gi, '').replace(/\s+/g, ' ').trim();
+  const first = cleaned.split(/[.!?\n]/)[0].trim();
+  const title = first.length > 0 ? first : cleaned;
+  return title.length > 65 ? title.slice(0, 62) + '…' : title;
+}
+
+// Extracts Jira ticket numbers (SUP-, CI-, REL-, IMP-)
+function extractTickets(text: string): string[] {
+  return [...new Set((text.match(/\b(?:SUP|CI|REL|IMP)-\d+/gi) ?? []).map(t => t.toUpperCase()))];
 }
 
 async function getL1Members(
@@ -89,7 +110,6 @@ async function scanMentions(
   const results: Mention[] = [];
   for (const match of (search.messages?.matches ?? [])) {
     if (!match.ts || parseFloat(match.ts) < oldestTs) continue;
-    // Exclude messages from the reporting channel (our own scan summaries)
     if (match.channel?.id === reportingChannelId) continue;
 
     const { attended, attendedBy } = await checkThread(
@@ -104,7 +124,6 @@ async function scanMentions(
       channelName: match.channel?.name ?? 'unknown',
       messageTs: match.ts,
       userName: match.username ?? 'Unknown',
-      // Strip Slack formatting tokens for readable text
       text: (match.text ?? '')
         .replace(/<!subteam\^[^>]+>/g, '@l1-support')
         .replace(/<[^>]+>/g, '')
@@ -117,35 +136,113 @@ async function scanMentions(
   return results;
 }
 
-function buildSummary(mentions: Mention[], memberMentions: string, istStr: string): string {
+function buildBlocks(
+  mentions: Mention[],
+  memberMentions: string,
+  istStr: string
+): { blocks: KnownBlock[]; text: string } {
   const attended = mentions.filter(m => m.attended);
   const unattended = mentions.filter(m => !m.attended);
+  const blocks: KnownBlock[] = [];
 
-  let msg = `:bar_chart: _L1 Support Scan Summary — ${istStr}_\n\n`;
-  msg += `*${mentions.length} total @l1-support mentions* found (last ${LOOKBACK_DAYS} days).\n\n`;
+  // ── Header ──────────────────────────────────────────────────────────────
+  blocks.push({
+    type: 'header',
+    text: { type: 'plain_text', text: '📡 L1 Support Mention Tracker', emoji: true },
+  });
+  blocks.push({
+    type: 'context',
+    elements: [{
+      type: 'mrkdwn',
+      text: `Last scanned: *${istStr}*  ·  Total: *${mentions.length}*  ·  :red_circle: Unattended: *${unattended.length}*  ·  :large_green_circle: Attended: *${attended.length}*  ·  Lookback: ${LOOKBACK_DAYS} days`,
+    }],
+  });
+  blocks.push({ type: 'divider' });
 
+  // ── Unattended ──────────────────────────────────────────────────────────
   if (unattended.length > 0) {
-    msg += `:red_circle: *UNATTENDED (${unattended.length})*\n\n`;
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: `:rotating_light: *UNATTENDED — Action Required (${unattended.length})*` },
+    });
+
     unattended.forEach((m, i) => {
-      const snippet = m.text.length > 150 ? m.text.slice(0, 150) + '…' : m.text;
-      msg += `${i + 1}. _${m.userName}_ — #${m.channelName}\n`;
-      msg += `> ${snippet}\n`;
-      msg += `:red_circle: _No L1 response yet_ · :link: ${m.permalink}\n\n`;
+      const title = extractTitle(m.text);
+      const tickets = extractTickets(m.text);
+      const ticketLine = tickets.length > 0
+        ? `\n• *Tickets:* ${tickets.map(t => `<${JIRA_BASE}/${t}|${t}>`).join('  |  ')}`
+        : '';
+      const snippet = m.text.length > 200 ? m.text.slice(0, 197) + '…' : m.text;
+
+      blocks.push({
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: [
+            `*${i + 1}. <#${m.channelId}|${m.channelName}> — ${title}*`,
+            `• *From:* ${m.userName}   • *Time:* ${slackDate(m.messageTs)}`,
+            `• *Status:* :red_circle: *UNATTENDED — No L1 response yet*`,
+            `• *Message:* _"${snippet}"_`,
+            ticketLine ? ticketLine.slice(1) : null,
+            `• :link: <${m.permalink}|View thread>`,
+          ].filter(Boolean).join('\n'),
+        },
+      });
     });
-    msg += `:rotating_light: *Action needed:* ${memberMentions} — Please attend to the above.\n\n`;
+
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: `:rotating_light: *Action needed:* ${memberMentions} — Please attend to the above.` },
+    });
   } else {
-    msg += `:white_check_mark: All @l1-support mentions have been attended to.\n\n`;
-  }
-
-  if (attended.length > 0) {
-    msg += `:large_green_circle: *ATTENDED (${attended.length})*\n`;
-    attended.forEach(m => {
-      const responders = m.attendedBy.map(id => `<@${id}>`).join(', ');
-      msg += `• _${m.userName}_ in #${m.channelName} → ${responders}\n`;
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: ':white_check_mark: *All @l1-support mentions have been attended to.*' },
     });
   }
 
-  return msg;
+  blocks.push({ type: 'divider' });
+
+  // ── Attended ────────────────────────────────────────────────────────────
+  if (attended.length > 0) {
+    const lines = attended.map((m, i) => {
+      const responders = m.attendedBy.map(id => `<@${id}>`).join(', ');
+      const tickets = extractTickets(m.text);
+      const ticketSuffix = tickets.length > 0
+        ? `  ·  ${tickets.map(t => `<${JIRA_BASE}/${t}|${t}>`).join(' | ')}`
+        : '';
+      return `:large_green_circle: *${unattended.length + i + 1}.* _${m.userName}_ in <#${m.channelId}|${m.channelName}> → attended by ${responders}${ticketSuffix}  ·  <${m.permalink}|view>`;
+    });
+
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `:white_check_mark: *ATTENDED — Being Handled (${attended.length})*\n\n${lines.join('\n')}`,
+      },
+    });
+    blocks.push({ type: 'divider' });
+  }
+
+  // ── Quick Stats ─────────────────────────────────────────────────────────
+  blocks.push({
+    type: 'section',
+    text: {
+      type: 'mrkdwn',
+      text: [
+        ':bar_chart: *Quick Stats*',
+        `• Total @l1-support mentions (last ${LOOKBACK_DAYS} days): *${mentions.length}*`,
+        `:large_green_circle: Attended by L1 team: *${attended.length}*`,
+        `:red_circle: Unattended: *${unattended.length}*`,
+      ].join('\n'),
+    },
+  });
+
+  const text = unattended.length > 0
+    ? `:rotating_light: ${unattended.length} unattended @l1-support mention${unattended.length > 1 ? 's' : ''} — action required`
+    : `:white_check_mark: All ${mentions.length} @l1-support mention${mentions.length !== 1 ? 's' : ''} attended to`;
+
+  return { blocks, text };
 }
 
 async function main() {
@@ -178,9 +275,9 @@ async function main() {
   console.log(`[${istStr}] ${mentions.length} mentions found, ${unattendedCount} unattended`);
 
   const memberMentions = l1MemberIds.map(id => `<@${id}>`).join(' ');
-  const text = buildSummary(mentions, memberMentions, istStr);
+  const { blocks, text } = buildBlocks(mentions, memberMentions, istStr);
 
-  await client.chat.postMessage({ channel, text, mrkdwn: true });
+  await client.chat.postMessage({ channel, text, blocks });
   console.log(`[${istStr}] Posted summary to ${channel}`);
 }
 
