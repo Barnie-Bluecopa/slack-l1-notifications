@@ -34,4 +34,5 @@ jobs:
           SLACK_USER_TOKEN: ${{ secrets.SLACK_USER_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
           SLACK_L1_USERGROUP_ID: ${{ secrets.SLACK_L1_USERGROUP_ID }}
+          SLACK_CANVAS_ID: ${{ secrets.SLACK_CANVAS_ID }}
           FORCE_TRIGGER: ${{ github.event.inputs.force }}

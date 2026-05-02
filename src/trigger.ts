@@ -23,10 +23,19 @@ function isTriggerTime(ist: Date): boolean {
   return remainder <= JITTER_TOLERANCE || remainder >= INTERVAL_MINUTES - JITTER_TOLERANCE;
 }
 
-// Renders as the user's local time in Slack
+// Renders as the user's local timezone in Slack messages
 function slackDate(ts: string): string {
   const unix = Math.floor(parseFloat(ts));
   return `<!date^${unix}^{date_short_pretty} at {time}|${new Date(unix * 1000).toISOString()}>`;
+}
+
+// Human-readable IST date for canvas (canvases don't support <!date^...> tokens)
+function canvasDate(ts: string): string {
+  return new Date(parseFloat(ts) * 1000).toLocaleString('en-US', {
+    month: 'short', day: 'numeric',
+    hour: 'numeric', minute: '2-digit',
+    timeZone: 'Asia/Kolkata',
+  }) + ' IST';
 }
 
 // First meaningful sentence from the message, stripped of @l1-support prefix
@@ -136,6 +145,8 @@ async function scanMentions(
   return results;
 }
 
+// ── Channel message (Block Kit) ──────────────────────────────────────────────
+
 function buildBlocks(
   mentions: Mention[],
   memberMentions: string,
@@ -145,7 +156,6 @@ function buildBlocks(
   const unattended = mentions.filter(m => !m.attended);
   const blocks: KnownBlock[] = [];
 
-  // ── Header ──────────────────────────────────────────────────────────────
   blocks.push({
     type: 'header',
     text: { type: 'plain_text', text: '📡 L1 Support Mention Tracker', emoji: true },
@@ -159,7 +169,6 @@ function buildBlocks(
   });
   blocks.push({ type: 'divider' });
 
-  // ── Unattended ──────────────────────────────────────────────────────────
   if (unattended.length > 0) {
     blocks.push({
       type: 'section',
@@ -203,7 +212,6 @@ function buildBlocks(
 
   blocks.push({ type: 'divider' });
 
-  // ── Attended ────────────────────────────────────────────────────────────
   if (attended.length > 0) {
     const lines = attended.map((m, i) => {
       const responders = m.attendedBy.map(id => `<@${id}>`).join(', ');
@@ -214,7 +222,7 @@ function buildBlocks(
       return `:large_green_circle: *${unattended.length + i + 1}.* _${m.userName}_ in <#${m.channelId}|${m.channelName}> → attended by ${responders}${ticketSuffix}  ·  <${m.permalink}|view>`;
     });
 
-    // Slack block text is capped at 3000 chars — chunk lines to stay under the limit
+    // Slack block text capped at 3000 chars — chunk lines as needed
     const chunks: string[] = [];
     let current = `:white_check_mark: *ATTENDED — Being Handled (${attended.length})*\n\n`;
     for (const line of lines) {
@@ -233,7 +241,6 @@ function buildBlocks(
     blocks.push({ type: 'divider' });
   }
 
-  // ── Quick Stats ─────────────────────────────────────────────────────────
   blocks.push({
     type: 'section',
     text: {
@@ -254,6 +261,161 @@ function buildBlocks(
   return { blocks, text };
 }
 
+// ── Canvas report ────────────────────────────────────────────────────────────
+
+function buildCanvasMarkdown(
+  mentions: Mention[],
+  l1MemberIds: string[],
+  usergroupId: string,
+  istStr: string
+): string {
+  const attended = mentions.filter(m => m.attended);
+  const unattended = mentions.filter(m => !m.attended);
+  const lines: string[] = [];
+
+  lines.push('# 📡 L1 Support Mention Tracker — Live Dashboard');
+  lines.push('');
+  lines.push(`**Last scanned: ${istStr}** · Total: **${mentions.length}** · :red_circle: Unattended: **${unattended.length}** · :large_green_circle: Attended: **${attended.length}** · Lookback: ${LOOKBACK_DAYS} days`);
+  lines.push('');
+
+  lines.push('---');
+  lines.push('');
+  lines.push('## :busts_in_silhouette: Current @l1-support Team Members');
+  lines.push('');
+  lines.push(l1MemberIds.map(id => `<@${id}>`).join('   '));
+  lines.push('');
+
+  lines.push('---');
+  lines.push('');
+  lines.push('## :rotating_light: Unattended Mentions — Action Required');
+  lines.push('');
+
+  if (unattended.length === 0) {
+    lines.push(':white_check_mark: No unattended mentions — all handled!');
+    lines.push('');
+  } else {
+    unattended.forEach((m, i) => {
+      const title = extractTitle(m.text);
+      const tickets = extractTickets(m.text);
+      const snippet = m.text.length > 300 ? m.text.slice(0, 297) + '…' : m.text;
+
+      lines.push(`### ${i + 1}. #${m.channelName} — ${title}`);
+      lines.push('');
+      lines.push(`* **From:** ${m.userName}`);
+      lines.push(`* **Channel:** <#${m.channelId}>`);
+      lines.push(`* **Time:** ${canvasDate(m.messageTs)}`);
+      lines.push(`* **Status:** :red_circle: **UNATTENDED — No L1 response**`);
+      lines.push(`* **Message:** *"${snippet}"*`);
+      if (tickets.length > 0) {
+        lines.push(`* **Tickets:** ${tickets.map(t => `[${t}](${JIRA_BASE}/${t})`).join(' | ')}`);
+      }
+      lines.push(`* **Link:** [View in Slack](${m.permalink})`);
+      lines.push('');
+    });
+  }
+
+  lines.push('---');
+  lines.push('');
+  lines.push('## :white_check_mark: Attended Mentions — Being Handled');
+  lines.push('');
+
+  if (attended.length === 0) {
+    lines.push('_No attended mentions in the lookback window._');
+    lines.push('');
+  } else {
+    attended.forEach((m, i) => {
+      const title = extractTitle(m.text);
+      const tickets = extractTickets(m.text);
+      const snippet = m.text.length > 300 ? m.text.slice(0, 297) + '…' : m.text;
+      const responders = m.attendedBy.map(id => `<@${id}>`).join(', ');
+
+      lines.push(`### ${unattended.length + i + 1}. #${m.channelName} — ${title}`);
+      lines.push('');
+      lines.push(`* **From:** ${m.userName}`);
+      lines.push(`* **Channel:** <#${m.channelId}>`);
+      lines.push(`* **Time:** ${canvasDate(m.messageTs)}`);
+      lines.push(`* **Status:** :large_green_circle: **Attended by** ${responders}`);
+      lines.push(`* **Message:** *"${snippet}"*`);
+      if (tickets.length > 0) {
+        lines.push(`* **Tickets:** ${tickets.map(t => `[${t}](${JIRA_BASE}/${t})`).join(' | ')}`);
+      }
+      lines.push(`* **Link:** [View in Slack](${m.permalink})`);
+      lines.push('');
+    });
+  }
+
+  lines.push('---');
+  lines.push('');
+  lines.push('## :bar_chart: Quick Stats');
+  lines.push('');
+  lines.push('| Metric | Count |');
+  lines.push('| --- | --- |');
+  lines.push(`| Total @l1-support mentions (last ${LOOKBACK_DAYS} days) | ${mentions.length} |`);
+  lines.push(`| :large_green_circle: Attended by L1 team | ${attended.length} |`);
+  lines.push(`| :red_circle: Unattended | ${unattended.length} |`);
+  lines.push('');
+
+  lines.push('---');
+  lines.push('');
+  lines.push('## :gear: How This Works');
+  lines.push('');
+  lines.push(`* **Scans** all public and private channels for \`@l1-support\` (subteam ${usergroupId}) mentions`);
+  lines.push('* **Checks threads** for responses from current @l1-support group members (dynamic — reflects real-time membership)');
+  lines.push('* **Visual cues:** :large_green_circle: Attended (with responder name) · :red_circle: Unattended');
+  lines.push('* Auto-updated by GitHub Actions every 45 minutes — no manual refresh needed');
+
+  return lines.join('\n');
+}
+
+async function refreshCanvas(
+  client: WebClient,
+  canvasId: string,
+  markdown: string
+): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const api = (client as any).canvases;
+  const sectionIds = new Set<string>();
+
+  // Gather section IDs via type-based + content-based lookups in parallel.
+  // Type lookup catches headers/lists/tables/dividers; content lookups catch
+  // paragraphs and callouts that have no dedicated section_type.
+  const lookups = [
+    { section_types: ['any_header', 'bullet_list', 'ordered_list', 'divider', 'table', 'media', 'todo', 'quote', 'code_block'] },
+    { contains_text: 'Last scanned:' },
+    { contains_text: 'UNATTENDED' },
+    { contains_text: 'ATTENDED' },
+    { contains_text: 'l1-support' },
+    { contains_text: 'How This Works' },
+    { contains_text: 'Tracker' },
+    { contains_text: 'auto-scans' },
+  ];
+
+  await Promise.allSettled(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    lookups.map(criteria =>
+      api.sections.lookup({ canvas_id: canvasId, criteria })
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .then((res: any) => {
+          for (const s of (res.sections ?? [])) {
+            if (s.id) sectionIds.add(s.id as string);
+          }
+        })
+    )
+  );
+
+  console.log(`  Found ${sectionIds.size} existing canvas sections to replace`);
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const changes: any[] = [
+    ...[...sectionIds].map(id => ({ operation: 'delete', section_id: id })),
+    { operation: 'insert_at_end', document_content: { type: 'markdown', markdown } },
+  ];
+
+  await api.edit({ canvas_id: canvasId, changes });
+}
+
+// ── Entry point ──────────────────────────────────────────────────────────────
+
 async function main() {
   const ist = toIST(new Date());
   const istStr = ist.toISOString().replace('T', ' ').slice(0, 16) + ' IST';
@@ -271,6 +433,7 @@ async function main() {
   if (!channel) throw new Error('SLACK_CHANNEL_ID is not set');
   const usergroupId = process.env.SLACK_L1_USERGROUP_ID;
   if (!usergroupId) throw new Error('SLACK_L1_USERGROUP_ID is not set');
+  const canvasId = process.env.SLACK_CANVAS_ID; // optional — skip canvas if not set
 
   const client = new WebClient(token);
 
@@ -284,10 +447,23 @@ async function main() {
   console.log(`[${istStr}] ${mentions.length} mentions found, ${unattendedCount} unattended`);
 
   const memberMentions = l1MemberIds.map(id => `<@${id}>`).join(' ');
-  const { blocks, text } = buildBlocks(mentions, memberMentions, istStr);
 
+  // Post channel message
+  const { blocks, text } = buildBlocks(mentions, memberMentions, istStr);
   await client.chat.postMessage({ channel, text, blocks });
   console.log(`[${istStr}] Posted summary to ${channel}`);
+
+  // Refresh canvas (best-effort — failure doesn't break channel message)
+  if (canvasId) {
+    console.log(`[${istStr}] Refreshing canvas ${canvasId}...`);
+    try {
+      const canvasMarkdown = buildCanvasMarkdown(mentions, l1MemberIds, usergroupId, istStr);
+      await refreshCanvas(client, canvasId, canvasMarkdown);
+      console.log(`[${istStr}] Canvas refreshed`);
+    } catch (err: unknown) {
+      console.error(`[${istStr}] Canvas refresh failed (channel message was already posted): ${(err as Error).message ?? err}`);
+    }
+  }
 }
 
 main().catch(err => {
