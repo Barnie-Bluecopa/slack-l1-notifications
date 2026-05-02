@@ -214,13 +214,22 @@ function buildBlocks(
       return `:large_green_circle: *${unattended.length + i + 1}.* _${m.userName}_ in <#${m.channelId}|${m.channelName}> → attended by ${responders}${ticketSuffix}  ·  <${m.permalink}|view>`;
     });
 
-    blocks.push({
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: `:white_check_mark: *ATTENDED — Being Handled (${attended.length})*\n\n${lines.join('\n')}`,
-      },
-    });
+    // Slack block text is capped at 3000 chars — chunk lines to stay under the limit
+    const chunks: string[] = [];
+    let current = `:white_check_mark: *ATTENDED — Being Handled (${attended.length})*\n\n`;
+    for (const line of lines) {
+      if (current.length + line.length + 1 > 2800) {
+        chunks.push(current.trimEnd());
+        current = line + '\n';
+      } else {
+        current += line + '\n';
+      }
+    }
+    if (current.trimEnd()) chunks.push(current.trimEnd());
+
+    for (const chunk of chunks) {
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: chunk } });
+    }
     blocks.push({ type: 'divider' });
   }
 
