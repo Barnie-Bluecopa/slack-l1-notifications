@@ -389,6 +389,9 @@ async function refreshCanvas(
     { contains_text: 'auto-scans' },
   ];
 
+  // Probe the first lookup and print the token's actual scopes on failure
+  // so missing_scope errors are immediately actionable.
+  let scopesVerified = false;
   for (const criteria of lookups) {
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -398,7 +401,14 @@ async function refreshCanvas(
         if (s.id) sectionIds.add(s.id as string);
       }
       console.log(`  canvas lookup ${JSON.stringify(criteria)}: ${found} section(s)`);
+      scopesVerified = true;
     } catch (e: unknown) {
+      const err = e as any;
+      if (!scopesVerified && err.data?.needed) {
+        console.log(`  canvas missing_scope — needed: "${err.data.needed}", token provides: "${err.data.provided ?? 'unknown'}"`);
+        console.log(`  Fix: go to api.slack.com/apps → OAuth & Permissions → copy the latest xoxp- token → update SLACK_USER_TOKEN secret`);
+        scopesVerified = true; // only print once
+      }
       console.log(`  canvas lookup ${JSON.stringify(criteria)}: FAILED — ${(e as Error).message ?? e}`);
     }
   }
