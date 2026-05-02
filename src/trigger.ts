@@ -376,10 +376,9 @@ async function refreshCanvas(
   const api = (client as any).canvases;
   const sectionIds = new Set<string>();
 
-  // Gather section IDs via type-based + content-based lookups in parallel.
-  // Type lookup catches headers/lists/tables/dividers; content lookups catch
-  // paragraphs and callouts that have no dedicated section_type.
-  const lookups = [
+  // Gather section IDs via type-based + content-based lookups sequentially.
+  // Log each one so failures are visible in the workflow run.
+  const lookups: Array<{ section_types?: string[]; contains_text?: string }> = [
     { section_types: ['any_header', 'bullet_list', 'ordered_list', 'divider', 'table', 'media', 'todo', 'quote', 'code_block'] },
     { contains_text: 'Last scanned:' },
     { contains_text: 'UNATTENDED' },
@@ -390,27 +389,31 @@ async function refreshCanvas(
     { contains_text: 'auto-scans' },
   ];
 
-  await Promise.allSettled(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    lookups.map(criteria =>
-      api.sections.lookup({ canvas_id: canvasId, criteria })
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        .then((res: any) => {
-          for (const s of (res.sections ?? [])) {
-            if (s.id) sectionIds.add(s.id as string);
-          }
-        })
-    )
-  );
+  for (const criteria of lookups) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const res: any = await api.sections.lookup({ canvas_id: canvasId, criteria });
+      const found = (res.sections ?? []).length;
+      for (const s of (res.sections ?? [])) {
+        if (s.id) sectionIds.add(s.id as string);
+      }
+      console.log(`  canvas lookup ${JSON.stringify(criteria)}: ${found} section(s)`);
+    } catch (e: unknown) {
+      console.log(`  canvas lookup ${JSON.stringify(criteria)}: FAILED — ${(e as Error).message ?? e}`);
+    }
+  }
 
-  console.log(`  Found ${sectionIds.size} existing canvas sections to replace`);
+  console.log(`  Total unique sections to clear: ${sectionIds.size}`);
 
+  // Delete all found sections, then insert fresh content at the start so it
+  // appears at the top even if some stale sections couldn't be deleted.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const changes: any[] = [
     ...[...sectionIds].map(id => ({ operation: 'delete', section_id: id })),
-    { operation: 'insert_at_end', document_content: { type: 'markdown', markdown } },
+    { operation: 'insert_at_start', document_content: { type: 'markdown', markdown } },
   ];
 
+  console.log(`  Calling canvases.edit with ${changes.length} change(s)...`);
   await api.edit({ canvas_id: canvasId, changes });
 }
 
