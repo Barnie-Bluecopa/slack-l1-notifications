@@ -376,21 +376,19 @@ async function refreshCanvas(
   const api = (client as any).canvases;
   const sectionIds = new Set<string>();
 
-  // Gather section IDs via type-based + content-based lookups sequentially.
-  // Log each one so failures are visible in the workflow run.
+  // Slack limits section_types to 3 per lookup — split into groups of 3.
   const lookups: Array<{ section_types?: string[]; contains_text?: string }> = [
-    { section_types: ['any_header', 'bullet_list', 'ordered_list', 'divider', 'table', 'media', 'todo', 'quote', 'code_block'] },
+    { section_types: ['any_header', 'bullet_list', 'ordered_list'] },
+    { section_types: ['divider', 'table', 'todo'] },
+    { section_types: ['quote', 'code_block', 'media'] },
     { contains_text: 'Last scanned:' },
     { contains_text: 'UNATTENDED' },
     { contains_text: 'ATTENDED' },
     { contains_text: 'l1-support' },
     { contains_text: 'How This Works' },
-    { contains_text: 'Tracker' },
     { contains_text: 'auto-scans' },
   ];
 
-  // Probe the first lookup and print the token's actual scopes on failure
-  // so missing_scope errors are immediately actionable.
   let scopesVerified = false;
   for (const criteria of lookups) {
     try {
@@ -403,11 +401,12 @@ async function refreshCanvas(
       console.log(`  canvas lookup ${JSON.stringify(criteria)}: ${found} section(s)`);
       scopesVerified = true;
     } catch (e: unknown) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const err = e as any;
       if (!scopesVerified && err.data?.needed) {
         console.log(`  canvas missing_scope — needed: "${err.data.needed}", token provides: "${err.data.provided ?? 'unknown'}"`);
         console.log(`  Fix: go to api.slack.com/apps → OAuth & Permissions → copy the latest xoxp- token → update SLACK_USER_TOKEN secret`);
-        scopesVerified = true; // only print once
+        scopesVerified = true;
       }
       console.log(`  canvas lookup ${JSON.stringify(criteria)}: FAILED — ${(e as Error).message ?? e}`);
     }
@@ -415,16 +414,20 @@ async function refreshCanvas(
 
   console.log(`  Total unique sections to clear: ${sectionIds.size}`);
 
-  // Delete all found sections, then insert fresh content at the start so it
-  // appears at the top even if some stale sections couldn't be deleted.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const changes: any[] = [
-    ...[...sectionIds].map(id => ({ operation: 'delete', section_id: id })),
-    { operation: 'insert_at_start', document_content: { type: 'markdown', markdown } },
-  ];
+  // canvases.edit only accepts 1 change per call — delete each section individually,
+  // then insert the fresh content.
+  for (const id of sectionIds) {
+    try {
+      await api.edit({ canvas_id: canvasId, changes: [{ operation: 'delete', section_id: id }] });
+    } catch (e: unknown) {
+      console.log(`  Failed to delete section ${id}: ${(e as Error).message ?? e}`);
+    }
+  }
 
-  console.log(`  Calling canvases.edit with ${changes.length} change(s)...`);
-  await api.edit({ canvas_id: canvasId, changes });
+  await api.edit({
+    canvas_id: canvasId,
+    changes: [{ operation: 'insert_at_start', document_content: { type: 'markdown', markdown } }],
+  });
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────────
