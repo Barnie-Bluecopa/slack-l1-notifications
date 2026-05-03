@@ -412,6 +412,51 @@ function buildCanvasMarkdown(
   return lines.join('\n');
 }
 
+// Every section type string worth trying — invalid ones fail silently.
+// Groups of 3 to satisfy Slack's per-call limit.
+const ALL_TYPE_CHUNKS: string[][] = [
+  ['any_header', 'bullet_list', 'ordered_list'],
+  ['divider', 'table', 'todo'],
+  ['quote', 'code_block', 'media'],
+  ['paragraph', 'rich_text', 'text'],
+  ['people', 'person', 'user_mention'],
+  ['image', 'video', 'audio'],
+  ['callout', 'embed', 'attachment'],
+  ['link', 'canvas_link', 'channel_section'],
+  ['heading1', 'heading2', 'heading3'],
+  ['checklist', 'checklist_item', 'workflow'],
+  ['file', 'canvas', 'sub_canvas'],
+];
+
+// Common short English words — ensures we find any text section that holds
+// natural-language content, regardless of its section type.
+const BROAD_TEXT_SWEEPS = ['the', 'in', 'is', 'to', 'of', 'an', 'at', 'by', 'no', 'or'];
+
+async function findAllSectionIds(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  api: any,
+  canvasId: string,
+  extraTexts: string[]
+): Promise<Set<string>> {
+  const ids = new Set<string>();
+
+  const collect = async (criteria: Record<string, unknown>) => {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const res: any = await api.sections.lookup({ canvas_id: canvasId, criteria });
+      for (const s of (res.sections ?? [])) if (s.id) ids.add(s.id as string);
+    } catch { /* invalid criteria or unknown type — skip */ }
+  };
+
+  await Promise.all([
+    ...ALL_TYPE_CHUNKS.map(types => collect({ section_types: types })),
+    ...BROAD_TEXT_SWEEPS.map(text => collect({ contains_text: text })),
+    ...extraTexts.map(text => collect({ contains_text: text })),
+  ]);
+
+  return ids;
+}
+
 async function refreshCanvas(
   client: WebClient,
   canvasId: string,
@@ -421,65 +466,35 @@ async function refreshCanvas(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const api = (client as any).canvases;
 
-  // ── Section-type sweeps (Slack: max 3 types per call) ─────────────────────
-  const typeChunks = [
-    ['any_header', 'bullet_list', 'ordered_list'],
-    ['divider', 'table', 'todo'],
-    ['quote', 'code_block', 'media'],
-    ['paragraph', 'rich_text', 'callout'],
-    ['people', 'person', 'image'],
-    ['embed', 'link', 'canvas_link'],
-  ];
-
-  // ── Text-content sweeps ────────────────────────────────────────────────────
-  // ' '  (single space) catches every text section that has any words.
-  // memberIds catch people-card sections that internally store a user ID.
-  // Named strings catch known content from any historical version of the canvas.
-  const textSweeps = [
-    ' ',
+  // Extra text targets: member IDs (catch people-card sections that store a
+  // raw user ID internally), plus known strings from any prior canvas version.
+  const extraTexts = [
     ...memberIds,
     'Tracker', 'scanned', 'Unattended', 'Attended', 'l1-support',
-    'local time', 'How This', 'Quick Stats', 'Support',
+    'local time', 'How This', 'Quick Stats', 'Support', 'Members',
   ];
 
-  // 4 passes: pass 1 finds the bulk, passes 2-4 catch anything only visible
-  // after earlier deletions expose new top-level sections.
-  for (let pass = 0; pass < 4; pass++) {
-    const ids = new Set<string>();
-
-    for (const types of typeChunks) {
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const res: any = await api.sections.lookup({ canvas_id: canvasId, criteria: { section_types: types } });
-        for (const s of (res.sections ?? [])) if (s.id) ids.add(s.id as string);
-      } catch { /* unsupported type — skip */ }
-    }
-
-    for (const text of textSweeps) {
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const res: any = await api.sections.lookup({ canvas_id: canvasId, criteria: { contains_text: text } });
-        for (const s of (res.sections ?? [])) if (s.id) ids.add(s.id as string);
-      } catch { /* ignore */ }
-    }
-
+  // Loop until every lookup strategy returns zero sections (cap at 15 passes).
+  for (let pass = 0; pass < 15; pass++) {
+    const ids = await findAllSectionIds(api, canvasId, extraTexts);
     if (ids.size === 0) {
-      console.log(`  Pass ${pass + 1}: canvas is empty — done clearing`);
+      console.log(`  Pass ${pass + 1}: canvas empty — clearing complete`);
       break;
     }
-    console.log(`  Pass ${pass + 1}: clearing ${ids.size} section(s)...`);
-    for (const id of ids) {
-      try {
-        await api.edit({ canvas_id: canvasId, changes: [{ operation: 'delete', section_id: id }] });
-      } catch { /* already gone */ }
-    }
+    console.log(`  Pass ${pass + 1}: deleting ${ids.size} section(s)...`);
+    await Promise.all(
+      [...ids].map(id =>
+        api.edit({ canvas_id: canvasId, changes: [{ operation: 'delete', section_id: id }] })
+          .catch(() => { /* already gone */ })
+      )
+    );
   }
 
   await api.edit({
     canvas_id: canvasId,
     changes: [{ operation: 'insert_at_start', document_content: { type: 'markdown', markdown } }],
   });
-  console.log('  Canvas content replaced');
+  console.log('  Canvas rebuilt from scratch');
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────────
