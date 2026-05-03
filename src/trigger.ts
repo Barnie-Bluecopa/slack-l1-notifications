@@ -165,9 +165,19 @@ async function scanMentions(
       l1MemberIds
     );
 
+    const ch = match.channel as { id?: string; name?: string; is_im?: boolean; is_mpim?: boolean; is_private?: boolean } | undefined;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let channelName = (ch?.name ?? '') as string;
+    if (!channelName || /^[A-Z][A-Z0-9]{8,}$/.test(channelName)) {
+      if (ch?.is_im) channelName = 'Direct Message';
+      else if (ch?.is_mpim) channelName = 'Group DM';
+      else if (ch?.is_private) channelName = 'Private Channel';
+      else channelName = 'unknown';
+    }
+
     results.push({
-      channelId: match.channel?.id ?? '',
-      channelName: match.channel?.name ?? 'unknown',
+      channelId: ch?.id ?? '',
+      channelName,
       messageTs: match.ts,
       userName: match.username ?? 'Unknown',
       text: (match.text ?? '')
@@ -412,49 +422,21 @@ function buildCanvasMarkdown(
   return lines.join('\n');
 }
 
-// Every section type string worth trying — invalid ones fail silently.
-// Groups of 3 to satisfy Slack's per-call limit.
-const ALL_TYPE_CHUNKS: string[][] = [
-  ['any_header', 'bullet_list', 'ordered_list'],
-  ['divider', 'table', 'todo'],
-  ['quote', 'code_block', 'media'],
-  ['paragraph', 'rich_text', 'text'],
-  ['people', 'person', 'user_mention'],
-  ['image', 'video', 'audio'],
-  ['callout', 'embed', 'attachment'],
-  ['link', 'canvas_link', 'channel_section'],
-  ['heading1', 'heading2', 'heading3'],
-  ['checklist', 'checklist_item', 'workflow'],
-  ['file', 'canvas', 'sub_canvas'],
-];
-
-// Common short English words — ensures we find any text section that holds
-// natural-language content, regardless of its section type.
-const BROAD_TEXT_SWEEPS = ['the', 'in', 'is', 'to', 'of', 'an', 'at', 'by', 'no', 'or'];
-
-async function findAllSectionIds(
+// Sequential canvas section lookup — one criteria at a time to stay inside
+// Slack's canvas API rate limits (Tier-2: ~20 req/min).
+async function lookupSectionIds(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   api: any,
   canvasId: string,
-  extraTexts: string[]
-): Promise<Set<string>> {
-  const ids = new Set<string>();
-
-  const collect = async (criteria: Record<string, unknown>) => {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const res: any = await api.sections.lookup({ canvas_id: canvasId, criteria });
-      for (const s of (res.sections ?? [])) if (s.id) ids.add(s.id as string);
-    } catch { /* invalid criteria or unknown type — skip */ }
-  };
-
-  await Promise.all([
-    ...ALL_TYPE_CHUNKS.map(types => collect({ section_types: types })),
-    ...BROAD_TEXT_SWEEPS.map(text => collect({ contains_text: text })),
-    ...extraTexts.map(text => collect({ contains_text: text })),
-  ]);
-
-  return ids;
+  criteria: Record<string, unknown>
+): Promise<string[]> {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const res: any = await api.sections.lookup({ canvas_id: canvasId, criteria });
+    return (res.sections ?? []).map((s: { id?: string }) => s.id).filter(Boolean) as string[];
+  } catch {
+    return [];
+  }
 }
 
 async function refreshCanvas(
@@ -466,35 +448,80 @@ async function refreshCanvas(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const api = (client as any).canvases;
 
-  // Extra text targets: member IDs (catch people-card sections that store a
-  // raw user ID internally), plus known strings from any prior canvas version.
-  const extraTexts = [
-    ...memberIds,
-    'Tracker', 'scanned', 'Unattended', 'Attended', 'l1-support',
-    'local time', 'How This', 'Quick Stats', 'Support', 'Members',
-  ];
-
-  // Loop until every lookup strategy returns zero sections (cap at 15 passes).
-  for (let pass = 0; pass < 15; pass++) {
-    const ids = await findAllSectionIds(api, canvasId, extraTexts);
-    if (ids.size === 0) {
-      console.log(`  Pass ${pass + 1}: canvas empty — clearing complete`);
-      break;
-    }
-    console.log(`  Pass ${pass + 1}: deleting ${ids.size} section(s)...`);
-    await Promise.all(
-      [...ids].map(id =>
-        api.edit({ canvas_id: canvasId, changes: [{ operation: 'delete', section_id: id }] })
-          .catch(() => { /* already gone */ })
-      )
-    );
+  // ── Step 1: try files.info to get ALL section IDs in one shot ─────────────
+  // canvases:read may cover this; fall back to lookup approach if it doesn't.
+  let seedIds: string[] = [];
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const fi: any = await client.files.info({ file: canvasId });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const blocks: any[] = fi?.file?.blocks ?? fi?.content_blocks ?? [];
+    seedIds = blocks.map(b => b.block_id ?? b.id).filter(Boolean) as string[];
+    console.log(`  files.info: found ${seedIds.length} block(s)`);
+  } catch (e: unknown) {
+    console.log(`  files.info unavailable (${(e as Error).message ?? e}) — using section lookup`);
   }
 
+  // ── Step 2: sequential lookups across all known types and text sweeps ──────
+  // All calls run one at a time — parallel calls hit Slack's rate limit hard.
+  const typeChunks = [
+    ['any_header', 'bullet_list', 'ordered_list'],
+    ['divider', 'table', 'todo'],
+    ['quote', 'code_block', 'media'],
+    ['rich_text', 'paragraph', 'people'],
+    ['image', 'callout', 'embed'],
+    ['heading1', 'heading2', 'heading3'],
+  ];
+  const textCriteria = [
+    'the', 'in', 'is',               // broad English — finds any readable text section
+    ...memberIds,                     // catches people-card sections storing raw user IDs
+    'Tracker', 'Unattended', 'Attended', 'l1-support', 'local time', 'scanned',
+  ];
+
+  const everDeleted = new Set<string>(seedIds); // skip IDs already queued from files.info
+
+  // Seed deletes from files.info
+  for (const id of seedIds) {
+    try {
+      await api.edit({ canvas_id: canvasId, changes: [{ operation: 'delete', section_id: id }] });
+    } catch { /* already gone */ }
+  }
+
+  // Lookup-based passes — stop when no new IDs appear that we haven't tried yet
+  for (let pass = 0; pass < 8; pass++) {
+    const found = new Set<string>();
+
+    for (const types of typeChunks) {
+      for (const id of await lookupSectionIds(api, canvasId, { section_types: types })) found.add(id);
+    }
+    for (const text of textCriteria) {
+      for (const id of await lookupSectionIds(api, canvasId, { contains_text: text })) found.add(id);
+    }
+
+    const newIds = [...found].filter(id => !everDeleted.has(id));
+    const stillPresent = [...found].filter(id => everDeleted.has(id));
+
+    console.log(`  Pass ${pass + 1}: found ${found.size} section(s) total, ${newIds.length} new, ${stillPresent.length} already-deleted-but-still-indexed`);
+
+    if (newIds.length === 0) {
+      console.log(`  No new sections — clearing complete (${stillPresent.length} may be unfindable by API)`);
+      break;
+    }
+
+    for (const id of newIds) {
+      everDeleted.add(id);
+      try {
+        await api.edit({ canvas_id: canvasId, changes: [{ operation: 'delete', section_id: id }] });
+      } catch { /* already gone */ }
+    }
+  }
+
+  // ── Step 3: insert fresh content ──────────────────────────────────────────
   await api.edit({
     canvas_id: canvasId,
     changes: [{ operation: 'insert_at_start', document_content: { type: 'markdown', markdown } }],
   });
-  console.log('  Canvas rebuilt from scratch');
+  console.log('  Canvas rebuilt');
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────────
