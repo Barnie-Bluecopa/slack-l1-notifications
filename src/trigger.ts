@@ -415,15 +415,13 @@ function buildCanvasMarkdown(
 async function refreshCanvas(
   client: WebClient,
   canvasId: string,
-  markdown: string
+  markdown: string,
+  memberIds: string[]
 ): Promise<void> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const api = (client as any).canvases;
 
-  // Slack limits section_types to 3 per criteria call.
-  // Cover every known type (including rich_text for paragraphs and people for
-  // profile cards) and sweep by content text as a fallback safety net.
-  // Run 3 passes so anything missed on pass 1 is caught on pass 2 or 3.
+  // ── Section-type sweeps (Slack: max 3 types per call) ─────────────────────
   const typeChunks = [
     ['any_header', 'bullet_list', 'ordered_list'],
     ['divider', 'table', 'todo'],
@@ -432,44 +430,48 @@ async function refreshCanvas(
     ['people', 'person', 'image'],
     ['embed', 'link', 'canvas_link'],
   ];
-  // Common words that appear in any version of this canvas — catches sections
-  // the type-based lookup misses (e.g. non-standard or legacy section types).
-  const textSweeps = ['Tracker', 'scanned', 'Unattended', 'Attended', 'l1-support', 'local time'];
 
-  for (let pass = 0; pass < 3; pass++) {
+  // ── Text-content sweeps ────────────────────────────────────────────────────
+  // ' '  (single space) catches every text section that has any words.
+  // memberIds catch people-card sections that internally store a user ID.
+  // Named strings catch known content from any historical version of the canvas.
+  const textSweeps = [
+    ' ',
+    ...memberIds,
+    'Tracker', 'scanned', 'Unattended', 'Attended', 'l1-support',
+    'local time', 'How This', 'Quick Stats', 'Support',
+  ];
+
+  // 4 passes: pass 1 finds the bulk, passes 2-4 catch anything only visible
+  // after earlier deletions expose new top-level sections.
+  for (let pass = 0; pass < 4; pass++) {
     const ids = new Set<string>();
 
     for (const types of typeChunks) {
       try {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const res: any = await api.sections.lookup({ canvas_id: canvasId, criteria: { section_types: types } });
-        for (const s of (res.sections ?? [])) {
-          if (s.id) ids.add(s.id as string);
-        }
-      } catch {
-        // invalid type for this workspace — skip silently
-      }
+        for (const s of (res.sections ?? [])) if (s.id) ids.add(s.id as string);
+      } catch { /* unsupported type — skip */ }
     }
+
     for (const text of textSweeps) {
       try {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const res: any = await api.sections.lookup({ canvas_id: canvasId, criteria: { contains_text: text } });
-        for (const s of (res.sections ?? [])) {
-          if (s.id) ids.add(s.id as string);
-        }
-      } catch {
-        // ignore
-      }
+        for (const s of (res.sections ?? [])) if (s.id) ids.add(s.id as string);
+      } catch { /* ignore */ }
     }
 
-    if (ids.size === 0) break;
+    if (ids.size === 0) {
+      console.log(`  Pass ${pass + 1}: canvas is empty — done clearing`);
+      break;
+    }
     console.log(`  Pass ${pass + 1}: clearing ${ids.size} section(s)...`);
     for (const id of ids) {
       try {
         await api.edit({ canvas_id: canvasId, changes: [{ operation: 'delete', section_id: id }] });
-      } catch {
-        // section already gone — skip
-      }
+      } catch { /* already gone */ }
     }
   }
 
@@ -477,6 +479,7 @@ async function refreshCanvas(
     canvas_id: canvasId,
     changes: [{ operation: 'insert_at_start', document_content: { type: 'markdown', markdown } }],
   });
+  console.log('  Canvas content replaced');
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────────
@@ -525,7 +528,7 @@ async function main() {
       const allUserIds = [...new Set([...l1MemberIds, ...mentions.flatMap(m => m.attendedBy)])];
       const userNames = await resolveUserNames(client, allUserIds, nameCache);
       const canvasMarkdown = buildCanvasMarkdown(mentions, l1MemberIds, userNames, handle, istStr);
-      await refreshCanvas(client, canvasId, canvasMarkdown);
+      await refreshCanvas(client, canvasId, canvasMarkdown, l1MemberIds);
       console.log(`[${istStr}] Canvas refreshed`);
     } catch (err: unknown) {
       console.error(`[${istStr}] Canvas refresh failed (channel message was already posted): ${(err as Error).message ?? err}`);
