@@ -71,23 +71,61 @@ async function resolveUserNames(
   preloaded: Map<string, string> = new Map()
 ): Promise<Map<string, string>> {
   const nameMap = new Map<string, string>(preloaded);
-  // Only call users.info for IDs not already resolved from search results.
-  // Requires users:read scope — falls back silently if not yet approved.
   await Promise.all(
     userIds
       .filter(id => !nameMap.has(id))
       .map(async id => {
         try {
+          // users.info needs users:read scope
           const res = await client.users.info({ user: id });
           const p = res.user?.profile;
           const name = (p?.display_name || p?.real_name || res.user?.name) as string | undefined;
           if (name) nameMap.set(id, name);
         } catch {
-          // scope not yet granted — leave unresolved, canvas will show generic label
+          try {
+            // users.profile.get needs users.profile:read — try as fallback
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const res2: any = await (client as any).users.profile.get({ user: id });
+            const name = res2.profile?.display_name || res2.profile?.real_name as string | undefined;
+            if (name) nameMap.set(id, name);
+          } catch { /* neither scope available yet */ }
         }
       })
   );
   return nameMap;
+}
+
+// Supplemental name lookup: search recent messages in the channels where
+// @l1-support was mentioned. L1 members reply there, so their profiles
+// appear in those channel search results — no extra scope needed.
+async function enrichNameCacheFromChannels(
+  client: WebClient,
+  targetIds: string[],
+  channelNames: string[],
+  nameMap: Map<string, string>
+): Promise<void> {
+  const missing = targetIds.filter(id => !nameMap.has(id));
+  if (missing.length === 0) return;
+
+  for (const ch of channelNames.slice(0, 5)) {
+    if (missing.every(id => nameMap.has(id))) break;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const res: any = await (client as any).search.messages({
+        query: `in:${ch}`,
+        count: 100,
+        sort: 'timestamp',
+        sort_dir: 'desc',
+      });
+      for (const match of (res.messages?.matches ?? [])) {
+        if (!match.user || !missing.includes(match.user as string)) continue;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const prof = (match as any).user_profile;
+        const name = prof?.display_name || prof?.real_name || match.username as string | undefined;
+        if (name) nameMap.set(match.user as string, name as string);
+      }
+    } catch { /* channel search failed — skip */ }
+  }
 }
 
 interface Mention {
@@ -330,14 +368,11 @@ function buildCanvasMarkdown(
   lines.push('');
   lines.push('## :busts_in_silhouette: Current @l1-support Team Members');
   lines.push('');
-  const resolvedMembers = l1MemberIds.map(id => userNames.get(id)).filter(Boolean) as string[];
-  if (resolvedMembers.length === l1MemberIds.length) {
-    lines.push(resolvedMembers.map(n => `@${n}`).join('   '));
-  } else if (resolvedMembers.length > 0) {
-    lines.push(resolvedMembers.map(n => `@${n}`).join('   ') + `  _(+ ${l1MemberIds.length - resolvedMembers.length} more)_`);
-  } else {
-    lines.push(`@${usergroupHandle} — ${l1MemberIds.length} members`);
-  }
+  // Always list every member. Resolved names show as @name; unresolved fall
+  // back to @member-N so no IDs leak and the count is always accurate.
+  lines.push(
+    l1MemberIds.map((id, i) => `@${userNames.get(id) ?? `member-${i + 1}`}`).join('   ')
+  );
   lines.push('');
 
   lines.push('---');
@@ -569,6 +604,13 @@ async function main() {
     try {
       const allUserIds = [...new Set([...l1MemberIds, ...mentions.flatMap(m => m.attendedBy)])];
       const userNames = await resolveUserNames(client, allUserIds, nameCache);
+
+      // Supplemental: search recent messages in channels where @l1-support was
+      // mentioned — L1 members reply there, so their profiles surface for free.
+      const uniqueChannels = [...new Set(mentions.map(m => m.channelName).filter(n => n && n !== 'unknown' && n !== 'Direct Message' && n !== 'Group DM' && n !== 'Private Channel'))];
+      await enrichNameCacheFromChannels(client, allUserIds, uniqueChannels, userNames);
+      console.log(`[${istStr}] Names resolved: ${[...userNames.keys()].length}/${allUserIds.length}`);
+
       const canvasMarkdown = buildCanvasMarkdown(mentions, l1MemberIds, userNames, handle, istStr);
       await refreshCanvas(client, canvasId, canvasMarkdown, l1MemberIds);
       console.log(`[${istStr}] Canvas refreshed`);
