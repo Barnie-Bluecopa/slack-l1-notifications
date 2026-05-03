@@ -230,6 +230,15 @@ async function scanMentions(
   return { mentions: results, nameCache };
 }
 
+// Returns a Slack mrkdwn channel reference that actually renders.
+// <#C..|name> renders as a clickable #channel; DM/MPIM IDs (D..) do not —
+// for those, return plain text so nothing raw leaks into the message.
+function chanRef(channelId: string, channelName: string): string {
+  return /^[CG][A-Z0-9]+$/.test(channelId)
+    ? `<#${channelId}|${channelName}>`
+    : channelName;
+}
+
 // ── Channel message (Block Kit) ──────────────────────────────────────────────
 
 function buildBlocks(
@@ -273,7 +282,7 @@ function buildBlocks(
         text: {
           type: 'mrkdwn',
           text: [
-            `*${i + 1}. <#${m.channelId}|${m.channelName}> — ${title}*`,
+            `*${i + 1}. ${chanRef(m.channelId, m.channelName)} — ${title}*`,
             `• *From:* ${m.userName}   • *Time:* ${slackDate(m.messageTs)}`,
             `• *Status:* :red_circle: *UNATTENDED — No L1 response yet*`,
             `• *Message:* _"${snippet}"_`,
@@ -304,7 +313,7 @@ function buildBlocks(
       const ticketSuffix = tickets.length > 0
         ? `  ·  ${tickets.map(t => `<${JIRA_BASE}/${t}|${t}>`).join(' | ')}`
         : '';
-      return `:large_green_circle: *${unattended.length + i + 1}.* _${m.userName}_ in <#${m.channelId}|${m.channelName}> → attended by ${responders}${ticketSuffix}  ·  <${m.permalink}|view>`;
+      return `:large_green_circle: *${unattended.length + i + 1}.* _${m.userName}_ in ${chanRef(m.channelId, m.channelName)} → attended by ${responders}${ticketSuffix}  ·  <${m.permalink}|view>`;
     });
 
     // Slack block text capped at 3000 chars — chunk lines as needed
