@@ -206,11 +206,13 @@ async function scanMentions(
     const ch = match.channel as { id?: string; name?: string; is_im?: boolean; is_mpim?: boolean; is_private?: boolean } | undefined;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let channelName = (ch?.name ?? '') as string;
-    if (!channelName || /^[A-Z][A-Z0-9]{8,}$/.test(channelName)) {
-      if (ch?.is_im) channelName = 'Direct Message';
-      else if (ch?.is_mpim) channelName = 'Group DM';
-      else if (ch?.is_private) channelName = 'Private Channel';
-      else channelName = 'unknown';
+    // Replace raw IDs and internal system names (mpdm-...) with human labels.
+    if (ch?.is_im || /^[A-Z][A-Z0-9]{8,}$/.test(channelName)) {
+      channelName = 'Direct Message';
+    } else if (ch?.is_mpim || /^mpdm-/i.test(channelName)) {
+      channelName = 'Group DM';
+    } else if (!channelName) {
+      channelName = ch?.is_private ? 'Private Channel' : 'unknown';
     }
 
     results.push({
@@ -234,6 +236,11 @@ async function scanMentions(
 // <#C..|name> renders as a clickable #channel; DM/MPIM IDs (D..) do not —
 // for those, return plain text so nothing raw leaks into the message.
 function chanRef(channelId: string, channelName: string): string {
+  // MPDM group-DMs have C-prefixed IDs but mpdm- names — Slack won't render
+  // <#C..|mpdm-...> as a link, so fall through to plain text.
+  if (/^mpdm-/i.test(channelName) || channelName === 'Direct Message' || channelName === 'Group DM') {
+    return channelName;
+  }
   return /^[CG][A-Z0-9]+$/.test(channelId)
     ? `<#${channelId}|${channelName}>`
     : channelName;
