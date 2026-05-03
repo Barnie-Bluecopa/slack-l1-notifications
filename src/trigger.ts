@@ -67,20 +67,25 @@ async function getL1Members(
 
 async function resolveUserNames(
   client: WebClient,
-  userIds: string[]
+  userIds: string[],
+  preloaded: Map<string, string> = new Map()
 ): Promise<Map<string, string>> {
-  const nameMap = new Map<string, string>();
+  const nameMap = new Map<string, string>(preloaded);
+  // Only call users.info for IDs not already resolved from search results.
+  // Requires users:read scope — falls back silently if not yet approved.
   await Promise.all(
-    userIds.map(async id => {
-      try {
-        const res = await client.users.info({ user: id });
-        const p = res.user?.profile;
-        const name = (p?.display_name || p?.real_name || res.user?.name || id) as string;
-        nameMap.set(id, name);
-      } catch {
-        nameMap.set(id, id);
-      }
-    })
+    userIds
+      .filter(id => !nameMap.has(id))
+      .map(async id => {
+        try {
+          const res = await client.users.info({ user: id });
+          const p = res.user?.profile;
+          const name = (p?.display_name || p?.real_name || res.user?.name) as string | undefined;
+          if (name) nameMap.set(id, name);
+        } catch {
+          // scope not yet granted — leave unresolved, canvas will show generic label
+        }
+      })
   );
   return nameMap;
 }
@@ -125,7 +130,7 @@ async function scanMentions(
   l1MemberIds: string[],
   usergroupHandle: string,
   reportingChannelId: string
-): Promise<Mention[]> {
+): Promise<{ mentions: Mention[]; nameCache: Map<string, string> }> {
   const oldestTs = Math.floor((Date.now() - LOOKBACK_DAYS * 24 * 3600 * 1000) / 1000);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -136,8 +141,20 @@ async function scanMentions(
     sort_dir: 'desc',
   });
 
+  // search.messages returns user_profile on each match — extract names for free,
+  // no users:read scope required.
+  const nameCache = new Map<string, string>();
   const results: Mention[] = [];
+
   for (const match of (search.messages?.matches ?? [])) {
+    // Build name cache regardless of age/channel filter
+    if (match.user) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const prof = (match as any).user_profile;
+      const name = prof?.display_name || prof?.real_name || match.username;
+      if (name) nameCache.set(match.user as string, name as string);
+    }
+
     if (!match.ts || parseFloat(match.ts) < oldestTs) continue;
     if (match.channel?.id === reportingChannelId) continue;
 
@@ -162,7 +179,7 @@ async function scanMentions(
       attendedBy,
     });
   }
-  return results;
+  return { mentions: results, nameCache };
 }
 
 // ── Channel message (Block Kit) ──────────────────────────────────────────────
@@ -303,7 +320,14 @@ function buildCanvasMarkdown(
   lines.push('');
   lines.push('## :busts_in_silhouette: Current @l1-support Team Members');
   lines.push('');
-  lines.push(l1MemberIds.map(id => `@${userNames.get(id) ?? id}`).join('   '));
+  const resolvedMembers = l1MemberIds.map(id => userNames.get(id)).filter(Boolean) as string[];
+  if (resolvedMembers.length === l1MemberIds.length) {
+    lines.push(resolvedMembers.map(n => `@${n}`).join('   '));
+  } else if (resolvedMembers.length > 0) {
+    lines.push(resolvedMembers.map(n => `@${n}`).join('   ') + `  _(+ ${l1MemberIds.length - resolvedMembers.length} more)_`);
+  } else {
+    lines.push(`@${usergroupHandle} — ${l1MemberIds.length} members`);
+  }
   lines.push('');
 
   lines.push('---');
@@ -348,7 +372,7 @@ function buildCanvasMarkdown(
       const title = extractTitle(m.text);
       const tickets = extractTickets(m.text);
       const snippet = m.text.length > 300 ? m.text.slice(0, 297) + '…' : m.text;
-      const responders = m.attendedBy.map(id => `@${userNames.get(id) ?? id}`).join(', ');
+      const responders = m.attendedBy.map(id => `@${userNames.get(id) ?? 'team member'}`).join(', ');
 
       lines.push(`### ${unattended.length + i + 1}. #${m.channelName} — ${title}`);
       lines.push('');
@@ -396,17 +420,25 @@ async function refreshCanvas(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const api = (client as any).canvases;
 
-  // Slack limits section_types to 3 per criteria call. Cover all known types
-  // across multiple calls and run two passes to catch anything missed on the first.
+  // Slack limits section_types to 3 per criteria call.
+  // Cover every known type (including rich_text for paragraphs and people for
+  // profile cards) and sweep by content text as a fallback safety net.
+  // Run 3 passes so anything missed on pass 1 is caught on pass 2 or 3.
   const typeChunks = [
     ['any_header', 'bullet_list', 'ordered_list'],
     ['divider', 'table', 'todo'],
     ['quote', 'code_block', 'media'],
-    ['paragraph', 'callout', 'image'],
+    ['paragraph', 'rich_text', 'callout'],
+    ['people', 'person', 'image'],
+    ['embed', 'link', 'canvas_link'],
   ];
+  // Common words that appear in any version of this canvas — catches sections
+  // the type-based lookup misses (e.g. non-standard or legacy section types).
+  const textSweeps = ['Tracker', 'scanned', 'Unattended', 'Attended', 'l1-support', 'local time'];
 
-  for (let pass = 0; pass < 2; pass++) {
+  for (let pass = 0; pass < 3; pass++) {
     const ids = new Set<string>();
+
     for (const types of typeChunks) {
       try {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -415,9 +447,21 @@ async function refreshCanvas(
           if (s.id) ids.add(s.id as string);
         }
       } catch {
-        // unknown type chunk — skip silently
+        // invalid type for this workspace — skip silently
       }
     }
+    for (const text of textSweeps) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const res: any = await api.sections.lookup({ canvas_id: canvasId, criteria: { contains_text: text } });
+        for (const s of (res.sections ?? [])) {
+          if (s.id) ids.add(s.id as string);
+        }
+      } catch {
+        // ignore
+      }
+    }
+
     if (ids.size === 0) break;
     console.log(`  Pass ${pass + 1}: clearing ${ids.size} section(s)...`);
     for (const id of ids) {
@@ -463,7 +507,7 @@ async function main() {
   console.log(`[${istStr}] ${l1MemberIds.length} members in @${handle}`);
 
   console.log(`[${istStr}] Scanning for @${handle} mentions...`);
-  const mentions = await scanMentions(client, l1MemberIds, handle, channel);
+  const { mentions, nameCache } = await scanMentions(client, l1MemberIds, handle, channel);
   const unattendedCount = mentions.filter(m => !m.attended).length;
   console.log(`[${istStr}] ${mentions.length} mentions found, ${unattendedCount} unattended`);
 
@@ -479,7 +523,7 @@ async function main() {
     console.log(`[${istStr}] Refreshing canvas ${canvasId}...`);
     try {
       const allUserIds = [...new Set([...l1MemberIds, ...mentions.flatMap(m => m.attendedBy)])];
-      const userNames = await resolveUserNames(client, allUserIds);
+      const userNames = await resolveUserNames(client, allUserIds, nameCache);
       const canvasMarkdown = buildCanvasMarkdown(mentions, l1MemberIds, userNames, handle, istStr);
       await refreshCanvas(client, canvasId, canvasMarkdown);
       console.log(`[${istStr}] Canvas refreshed`);
