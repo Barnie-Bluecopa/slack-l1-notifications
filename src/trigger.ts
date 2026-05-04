@@ -47,6 +47,7 @@ async function getL1Members(
   const ids = (usersResult.users as string[]) ?? [];
   const group = groupsResult.usergroups?.find(g => g.id === usergroupId);
   const handle = group?.handle ?? 'l1-support';
+  console.log(`  l1MemberIds (${ids.length}): ${ids.join(', ')}`);
   return { ids, handle };
 }
 
@@ -136,14 +137,20 @@ async function checkThread(
       ts: messageTs,
       limit: 100,
     });
+    const replyMsgs = (replies.messages ?? []).slice(1);
     const attendedBy: string[] = [];
-    for (const msg of (replies.messages ?? []).slice(1)) {
+    for (const msg of replyMsgs) {
       if (msg.user && l1MemberIds.includes(msg.user)) {
         attendedBy.push(msg.user);
       }
     }
+    if (replyMsgs.length > 0 && attendedBy.length === 0) {
+      const replierIds = replyMsgs.map(m => m.user).filter(Boolean);
+      console.log(`  checkThread ${channelId}: ${replyMsgs.length} reply/replies from [${replierIds.join(', ')}] — none in l1MemberIds`);
+    }
     return { attended: attendedBy.length > 0, attendedBy: [...new Set(attendedBy)] };
-  } catch {
+  } catch (err) {
+    console.warn(`  checkThread ${channelId}/${messageTs} failed: ${(err as Error).message ?? err}`);
     return { attended: false, attendedBy: [] };
   }
 }
