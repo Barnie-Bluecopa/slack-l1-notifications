@@ -193,12 +193,14 @@ async function scanMentions(
     // to return all replies; using a reply's ts only returns that sub-slice.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const threadTs = (match as any).thread_ts ?? match.ts;
+    console.log(`  mention ${match.channel?.id} match.ts=${match.ts} thread_ts=${(match as any).thread_ts ?? '(none)'}`);
     const { attended, attendedBy } = await checkThread(
       client,
       match.channel?.id ?? '',
       threadTs,
       l1MemberIds
     );
+    console.log(`  → ${attended ? 'attended by ' + attendedBy.join(',') : 'unattended'}`);
 
     const ch = match.channel as { id?: string; name?: string; is_im?: boolean; is_mpim?: boolean; is_private?: boolean } | undefined;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
