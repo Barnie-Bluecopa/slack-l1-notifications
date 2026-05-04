@@ -505,20 +505,13 @@ async function refreshCanvas(
     console.log(`  files.info unavailable (${(e as Error).message ?? e}) — using section lookup`);
   }
 
-  // ── Step 2: sequential lookups across all known types and text sweeps ──────
-  // All calls run one at a time — parallel calls hit Slack's rate limit hard.
-  const typeChunks = [
-    ['any_header', 'bullet_list', 'ordered_list'],
-    ['divider', 'table', 'todo'],
-    ['quote', 'code_block', 'media'],
-    ['rich_text', 'paragraph', 'people'],
-    ['image', 'callout', 'embed'],
-    ['heading1', 'heading2', 'heading3'],
-  ];
+  // ── Step 2: text-based sweeps to find all remaining sections ────────────────
+  // section_types lookup uses undocumented enum values that Slack rejects —
+  // text searches reliably find every section we generate.
   const textCriteria = [
-    'the', 'in', 'is',               // broad English — finds any readable text section
-    ...memberIds,                     // catches people-card sections storing raw user IDs
-    'Tracker', 'Unattended', 'Attended', 'l1-support', 'local time', 'scanned',
+    'the', 'in', 'is',
+    ...memberIds,
+    'Tracker', 'Unattended', 'Attended', 'l1-support', 'scanned',
   ];
 
   const everDeleted = new Set<string>(seedIds); // skip IDs already queued from files.info
@@ -530,13 +523,10 @@ async function refreshCanvas(
     } catch { /* already gone */ }
   }
 
-  // Lookup-based passes — stop when no new IDs appear that we haven't tried yet
+  // Text-sweep passes — stop when no new IDs appear
   for (let pass = 0; pass < 8; pass++) {
     const found = new Set<string>();
 
-    for (const types of typeChunks) {
-      for (const id of await lookupSectionIds(api, canvasId, { section_types: types })) found.add(id);
-    }
     for (const text of textCriteria) {
       for (const id of await lookupSectionIds(api, canvasId, { contains_text: text })) found.add(id);
     }
