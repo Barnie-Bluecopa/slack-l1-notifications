@@ -47,7 +47,6 @@ async function getL1Members(
   const ids = (usersResult.users as string[]) ?? [];
   const group = groupsResult.usergroups?.find(g => g.id === usergroupId);
   const handle = group?.handle ?? 'l1-support';
-  console.log(`  l1MemberIds (${ids.length}): ${ids.join(', ')}`);
   return { ids, handle };
 }
 
@@ -210,22 +209,17 @@ async function scanMentions(
     // to return all replies; using a reply's ts only returns that sub-slice.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const threadTs = (match as any).thread_ts ?? match.ts;
-    console.log(`  mention ${match.channel?.id} match.ts=${match.ts} thread_ts=${(match as any).thread_ts ?? '(none)'}`);
     const { attended, attendedBy, rootTs, rootUser, rootText } = await checkThread(
       client,
       match.channel?.id ?? '',
       threadTs,
       l1MemberIds
     );
-    console.log(`  → ${attended ? 'attended by ' + attendedBy.join(',') : 'unattended'} (rootTs=${rootTs})`);
 
     // Deduplicate: multiple search hits can point to the same thread (e.g. when
     // an L1 member's reply also mentions @l1-support). Keep the first hit only.
     const threadKey = `${match.channel?.id ?? ''}:${rootTs}`;
-    if (seenThreads.has(threadKey)) {
-      console.log(`  → duplicate thread ${threadKey}, skipping`);
-      continue;
-    }
+    if (seenThreads.has(threadKey)) continue;
     seenThreads.add(threadKey);
 
     const ch = match.channel as { id?: string; name?: string; is_im?: boolean; is_mpim?: boolean; is_private?: boolean } | undefined;
