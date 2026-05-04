@@ -2,25 +2,10 @@ import { WebClient } from '@slack/web-api';
 import type { KnownBlock } from '@slack/web-api';
 
 const LOOKBACK_DAYS = 3;
-const INTERVAL_MINUTES = 45;
-const START_HOUR_IST = 8;
-const END_HOUR_IST = 22;
-const JITTER_TOLERANCE = 2;
 const JIRA_BASE = 'https://assetten.atlassian.net/browse';
 
 function toIST(utc: Date): Date {
   return new Date(utc.getTime() + (5 * 60 + 30) * 60 * 1000);
-}
-
-function isTriggerTime(ist: Date): boolean {
-  const day = ist.getDay();
-  if (day === 0 || day === 6) return false;
-  const h = ist.getHours();
-  const m = ist.getMinutes();
-  if (h < START_HOUR_IST || h >= END_HOUR_IST) return false;
-  const minutesSinceOpen = (h - START_HOUR_IST) * 60 + m;
-  const remainder = minutesSinceOpen % INTERVAL_MINUTES;
-  return remainder <= JITTER_TOLERANCE || remainder >= INTERVAL_MINUTES - JITTER_TOLERANCE;
 }
 
 // Renders as the user's local timezone in Slack messages
@@ -580,13 +565,8 @@ async function refreshCanvas(
 async function main() {
   const ist = toIST(new Date());
   const istStr = ist.toISOString().replace('T', ' ').slice(0, 16) + ' IST';
-  const force = process.env.FORCE_TRIGGER === 'true';
 
-  console.log(`[${istStr}] force=${force} isTriggerTime=${isTriggerTime(ist)}`);
-  if (!force && !isTriggerTime(ist)) {
-    console.log(`[${istStr}] Not a trigger time — skipping.`);
-    return;
-  }
+  console.log(`[${istStr}] Starting L1 scan`);
 
   const token = process.env.SLACK_USER_TOKEN;
   if (!token) throw new Error('SLACK_USER_TOKEN is not set');

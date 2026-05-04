@@ -2,18 +2,13 @@ name: L1 Auto-Scan Trigger
 
 on:
   schedule:
-    # Every 15 min, 02:00–16:59 UTC (= 07:30–22:29 IST), weekdays only.
-    # IST = UTC+5:30, so all 45-min trigger times from 8:00 AM IST land exactly
-    # on UTC quarter-hour marks (:00, :15, :30, :45). The script filters to the
-    # correct trigger times; other cron fires are no-ops.
-    - cron: '*/15 2-16 * * 1-5'
+    # Every 45 min, 8:00 AM–9:30 PM IST (UTC+5:30), Mon–Fri.
+    # 19 exact trigger times — no runtime filtering needed.
+    - cron: '30 2,5,8,11,14 * * 1-5'   # 08:00 11:00 14:00 17:00 20:00 IST
+    - cron: '15 3,6,9,12,15 * * 1-5'   # 08:45 11:45 14:45 17:45 20:45 IST
+    - cron: '0 4,7,10,13,16 * * 1-5'   # 09:30 12:30 15:30 18:30 21:30 IST
+    - cron: '45 4,7,10,13 * * 1-5'     # 10:15 13:15 16:15 19:15 IST
   workflow_dispatch:
-    inputs:
-      force:
-        description: 'Post regardless of time check (for testing)'
-        required: false
-        type: boolean
-        default: false
 
 jobs:
   trigger:
@@ -35,4 +30,3 @@ jobs:
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
           SLACK_L1_USERGROUP_ID: ${{ secrets.SLACK_L1_USERGROUP_ID }}
           SLACK_CANVAS_ID: ${{ secrets.SLACK_CANVAS_ID }}
-          FORCE_TRIGGER: ${{ github.event.inputs.force }}
