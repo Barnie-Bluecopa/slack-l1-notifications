@@ -310,7 +310,7 @@ function buildBlocks(
       const ticketLine = tickets.length > 0
         ? `\n• *Tickets:* ${tickets.map(t => `<${JIRA_BASE}/${t}|${t}>`).join('  |  ')}`
         : '';
-      const snippet = m.text.length > 200 ? m.text.slice(0, 197) + '…' : m.text;
+      const snippet = (m.text.length > 200 ? m.text.slice(0, 197) + '…' : m.text).replace(/`{3,}/g, '`');
 
       blocks.push({
         type: 'section',
@@ -431,7 +431,7 @@ function buildCanvasMarkdown(
     unattended.forEach((m, i) => {
       const title = extractTitle(m.text);
       const tickets = extractTickets(m.text);
-      const snippet = m.text.length > 300 ? m.text.slice(0, 297) + '…' : m.text;
+      const snippet = (m.text.length > 300 ? m.text.slice(0, 297) + '…' : m.text).replace(/`{3,}/g, '`');
 
       lines.push(`### ${i + 1}. #${m.channelName} — ${title}`);
       lines.push('');
@@ -460,7 +460,7 @@ function buildCanvasMarkdown(
     attended.forEach((m, i) => {
       const title = extractTitle(m.text);
       const tickets = extractTickets(m.text);
-      const snippet = m.text.length > 300 ? m.text.slice(0, 297) + '…' : m.text;
+      const snippet = (m.text.length > 300 ? m.text.slice(0, 297) + '…' : m.text).replace(/`{3,}/g, '`');
       const responders = m.attendedBy.map(id => `@${userNames.get(id) ?? 'team member'}`).join(', ');
 
       lines.push(`### ${unattended.length + i + 1}. #${m.channelName} — ${title}`);
