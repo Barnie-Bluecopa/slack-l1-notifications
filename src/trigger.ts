@@ -130,14 +130,24 @@ async function checkThread(
   channelId: string,
   messageTs: string,
   l1MemberIds: string[]
-): Promise<{ attended: boolean; attendedBy: string[] }> {
+): Promise<{ attended: boolean; attendedBy: string[]; rootTs: string; rootUser?: string; rootText?: string }> {
   try {
-    const replies = await client.conversations.replies({
-      channel: channelId,
-      ts: messageTs,
-      limit: 100,
-    });
-    const replyMsgs = (replies.messages ?? []).slice(1);
+    let res = await client.conversations.replies({ channel: channelId, ts: messageTs, limit: 100 });
+    let messages = res.messages ?? [];
+    let rootTs = messageTs;
+
+    // If messageTs is a reply's ts (not the thread root), conversations.replies
+    // returns only that one message. Detect via messages[0].thread_ts and
+    // re-fetch with the actual root so all replies are visible.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const firstThreadTs = (messages[0] as any)?.thread_ts as string | undefined;
+    if (firstThreadTs && firstThreadTs !== messageTs) {
+      rootTs = firstThreadTs;
+      res = await client.conversations.replies({ channel: channelId, ts: rootTs, limit: 100 });
+      messages = res.messages ?? [];
+    }
+
+    const replyMsgs = messages.slice(1);
     const attendedBy: string[] = [];
     for (const msg of replyMsgs) {
       if (msg.user && l1MemberIds.includes(msg.user)) {
@@ -146,12 +156,18 @@ async function checkThread(
     }
     if (replyMsgs.length > 0 && attendedBy.length === 0) {
       const replierIds = replyMsgs.map(m => m.user).filter(Boolean);
-      console.log(`  checkThread ${channelId}/${messageTs}: ${replyMsgs.length} reply/replies from [${replierIds.join(', ')}] — none in l1MemberIds`);
+      console.log(`  checkThread ${channelId}/${rootTs}: ${replyMsgs.length} reply/replies from [${replierIds.join(', ')}] — none in l1MemberIds`);
     }
-    return { attended: attendedBy.length > 0, attendedBy: [...new Set(attendedBy)] };
+    return {
+      attended: attendedBy.length > 0,
+      attendedBy: [...new Set(attendedBy)],
+      rootTs,
+      rootUser: messages[0]?.user,
+      rootText: messages[0]?.text,
+    };
   } catch (err) {
     console.warn(`  checkThread ${channelId}/${messageTs} failed: ${(err as Error).message ?? err}`);
-    return { attended: false, attendedBy: [] };
+    return { attended: false, attendedBy: [], rootTs: messageTs };
   }
 }
 
@@ -175,6 +191,7 @@ async function scanMentions(
   // no users:read scope required.
   const nameCache = new Map<string, string>();
   const results: Mention[] = [];
+  const seenThreads = new Set<string>(); // channelId:rootTs — prevents double-counting
 
   for (const match of (search.messages?.matches ?? [])) {
     // Build name cache regardless of age/channel filter
@@ -194,13 +211,22 @@ async function scanMentions(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const threadTs = (match as any).thread_ts ?? match.ts;
     console.log(`  mention ${match.channel?.id} match.ts=${match.ts} thread_ts=${(match as any).thread_ts ?? '(none)'}`);
-    const { attended, attendedBy } = await checkThread(
+    const { attended, attendedBy, rootTs, rootUser, rootText } = await checkThread(
       client,
       match.channel?.id ?? '',
       threadTs,
       l1MemberIds
     );
-    console.log(`  → ${attended ? 'attended by ' + attendedBy.join(',') : 'unattended'}`);
+    console.log(`  → ${attended ? 'attended by ' + attendedBy.join(',') : 'unattended'} (rootTs=${rootTs})`);
+
+    // Deduplicate: multiple search hits can point to the same thread (e.g. when
+    // an L1 member's reply also mentions @l1-support). Keep the first hit only.
+    const threadKey = `${match.channel?.id ?? ''}:${rootTs}`;
+    if (seenThreads.has(threadKey)) {
+      console.log(`  → duplicate thread ${threadKey}, skipping`);
+      continue;
+    }
+    seenThreads.add(threadKey);
 
     const ch = match.channel as { id?: string; name?: string; is_im?: boolean; is_mpim?: boolean; is_private?: boolean } | undefined;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -214,12 +240,21 @@ async function scanMentions(
       channelName = ch?.is_private ? 'Private Channel' : 'unknown';
     }
 
+    // When the search hit was a reply (rootTs differs from match.ts), use the
+    // root message's user/text so the display shows the original request, not
+    // the L1 member's reply that happened to mention @l1-support.
+    const isReplyHit = rootTs !== match.ts;
+    const displayUser = isReplyHit
+      ? (rootUser ? (nameCache.get(rootUser) ?? 'Unknown') : match.username ?? 'Unknown')
+      : (match.username ?? 'Unknown');
+    const displayText = (isReplyHit && rootText ? rootText : match.text ?? '');
+
     results.push({
       channelId: ch?.id ?? '',
       channelName,
-      messageTs: match.ts,
-      userName: match.username ?? 'Unknown',
-      text: (match.text ?? '')
+      messageTs: rootTs,
+      userName: displayUser,
+      text: displayText
         .replace(/<!subteam\^[^>]+>/g, '@l1-support')
         .replace(/<[^>]+>/g, '')
         .trim(),
