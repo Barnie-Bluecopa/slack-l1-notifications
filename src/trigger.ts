@@ -146,7 +146,7 @@ async function checkThread(
     }
     if (replyMsgs.length > 0 && attendedBy.length === 0) {
       const replierIds = replyMsgs.map(m => m.user).filter(Boolean);
-      console.log(`  checkThread ${channelId}: ${replyMsgs.length} reply/replies from [${replierIds.join(', ')}] — none in l1MemberIds`);
+      console.log(`  checkThread ${channelId}/${messageTs}: ${replyMsgs.length} reply/replies from [${replierIds.join(', ')}] — none in l1MemberIds`);
     }
     return { attended: attendedBy.length > 0, attendedBy: [...new Set(attendedBy)] };
   } catch (err) {
@@ -188,10 +188,15 @@ async function scanMentions(
     if (!match.ts || parseFloat(match.ts) < oldestTs) continue;
     if (match.channel?.id === reportingChannelId) continue;
 
+    // If the @l1-support mention is inside a thread reply, match.ts is the
+    // reply's own timestamp. conversations.replies needs the thread ROOT ts
+    // to return all replies; using a reply's ts only returns that sub-slice.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const threadTs = (match as any).thread_ts ?? match.ts;
     const { attended, attendedBy } = await checkThread(
       client,
       match.channel?.id ?? '',
-      match.ts,
+      threadTs,
       l1MemberIds
     );
 
